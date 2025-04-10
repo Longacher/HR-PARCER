@@ -29,6 +29,7 @@ from urllib.parse import quote
 from openpyxl.drawing.image import Image
 from excel_photo_replacer import replace_photo_urls_with_images
 import shutil
+import random
 
 logging.basicConfig(
     level=logging.INFO,
@@ -486,10 +487,27 @@ async def handle_excel_file(message: types.Message, state: FSMContext):
         
         phones = []
         messages = []
+        delays = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            if row[0] and row[1]:
-                phones.append(str(row[0]).strip())
-                messages.append(str(row[1]).strip())
+            if row[0] and row[1]: 
+                phone = str(row[0]).strip()
+                message_text = str(row[1]).strip()
+                
+                delay = None
+                if len(row) > 2 and row[2] is not None:
+                    try:
+                        delay = float(row[2])
+                        if delay < 0:
+                            delay = None
+                    except (ValueError, TypeError):
+                        pass
+                
+                if delay is None:
+                    delay = random.uniform(120, 180)
+                
+                phones.append(phone)
+                messages.append(message_text)
+                delays.append(delay)
 
         if not phones:
             await message.answer("Файл не содержит данных для рассылки", reply_markup=get_whatsapp_keyboard())
@@ -498,6 +516,7 @@ async def handle_excel_file(message: types.Message, state: FSMContext):
         await state.update_data({
             'phones': phones,
             'messages': messages,
+            'delays': delays,
             'success_count': 0,
             'fail_count': 0
         })
@@ -511,7 +530,9 @@ async def handle_excel_file(message: types.Message, state: FSMContext):
         )
 
         await message.answer(
-            f"Найдено {len(phones)} получателей. Начать рассылку?",
+            f"Найдено {len(phones)} получателей. Начать рассылку?\n"
+            f"Минимальная задержка: {min(delays):.1f} сек\n"
+            f"Максимальная задержка: {max(delays):.1f} сек",
             reply_markup=confirm_keyboard
         )
         
@@ -536,14 +557,16 @@ async def confirm_sending(message: types.Message, state: FSMContext):
 
     phones = data['phones']
     messages = data['messages']
+    delays = data['delays']
 
-    for i, (phone, message_text) in enumerate(zip(phones, messages), 1):
+    for i, (phone, message_text, delay) in enumerate(zip(phones, messages, delays), 1):
         try:
             if not phone.isdigit() or len(phone) < 10:
                 data['fail_count'] += 1
                 logger.error(f"Неверный формат номера: {phone}")
                 continue
                 
+            # Отправляем сообщение
             result = await asyncio.to_thread(session.send_message, phone, message_text)
             
             if result.get("status") == "success":
@@ -559,11 +582,15 @@ async def confirm_sending(message: types.Message, state: FSMContext):
             progress = (
                 f"📊 Прогресс: {i}/{len(phones)}\n"
                 f"✅ Успешно: {data['success_count']}\n"
-                f"❌ Ошибок: {data['fail_count']}"
+                f"❌ Ошибок: {data['fail_count']}\n"
+                f"⏱ Следующее сообщение через: {delay:.1f} сек"
             )
             await message.answer(progress)
             await state.update_data(data)
-        time.sleep(3)
+        
+        if i < len(phones):
+            await asyncio.sleep(delay)
+
     report = (
         f"📤 Рассылка завершена!\n"
         f"Всего: {len(phones)}\n"
